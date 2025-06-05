@@ -1,2 +1,9 @@
 *.o
 src/predictor
+traces/fp_1
+traces/fp_2
+traces/int_1
+traces/int_2
+traces/mm_1
+traces/mm_2
+.vscode
