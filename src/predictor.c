@@ -38,7 +38,7 @@ int verbose;
 //
 
 // acutal gshare history register,  since pc is uint32_t, it is uint32_t.
-uint32_t g_history_reg;
+uint32_t g_history_reg = 0;
 // actual gshare 2-bit predictor.
 //         NT      NT      NT
 //      ----->  ----->  ----->
@@ -51,6 +51,9 @@ uint32_t g_history_reg;
 // to simplify the implementation.
 // actual 
 char *g_predictors;
+char *choice_table;
+uint32_t *local_history_table;
+char *local_prediction;
 
 //Used in both gshare and tournament
 // since they both use 2-bit predictor.
@@ -95,7 +98,32 @@ init_predictor()
       break;
     }
     case TOURNAMENT:
+    {
+      // global prediction table
+      size_t total_entries_for_predictor= 1 << ghistoryBits;
+      g_predictors = calloc(total_entries_for_predictor,1);
+      // set all the predictors to weakly not taken (01)
+      memset(g_predictors, 1, total_entries_for_predictor);
+
+      // choice table
+      choice_table = calloc(total_entries_for_predictor,1);
+      // set all the choices to weakly select global (01)
+      // 00: strong global
+      //01: weak global
+      //10: weak local
+      //11: strong local
+      memset(choice_table, 1, total_entries_for_predictor);
+
+      // local history table
+      size_t total_entries_for_local_history_table= 1 << pcIndexBits;
+      local_history_table = calloc(total_entries_for_local_history_table,sizeof(uint32_t));
+
+      // local prediction table
+      size_t total_entries_for_local_predictor = 1 << lhistoryBits;
+      local_prediction = calloc(total_entries_for_local_predictor,1);
+      
       break;
+    }
     case CUSTOM:
       break;
     default:
@@ -126,8 +154,30 @@ make_prediction(uint32_t pc)
       return get_predict(g_predictors + entry_address);
       break;
     }
-    case TOURNAMENT:
+    case TOURNAMENT:{
+      uint32_t mask = 1 << ghistoryBits;
+      mask = mask - 1;
+      uint32_t pc_lower = pc & mask;
+      uint32_t history_lower = g_history_reg & mask;
+      uint32_t entry_address = history_lower ^ pc_lower;
+      uint8_t predict_global = get_predict(g_predictors + entry_address);
+
+      uint32_t mask_local = 1 << pcIndexBits;
+      mask_local = mask_local - 1;
+      uint32_t pc_lower_local = pc & mask_local;
+
+      uint32_t mask_localhistory = 1 << lhistoryBits;
+      mask_localhistory = mask_localhistory - 1;
+
+      uint32_t local_history = *(local_history_table + pc_lower_local);
+      uint8_t predict_local = get_predict(local_prediction + (local_history & mask_localhistory));
+      uint8_t choice = get_predict(choice_table + pc_lower);
+      // 0: global
+      // 1: local
+      if (choice) return predict_local;
+      else return predict_global;
       break;
+    }
     case CUSTOM:
       break;
     default:
@@ -158,11 +208,53 @@ train_predictor(uint32_t pc, uint8_t outcome)
       uint32_t pc_lower = pc & mask;
       uint32_t history_lower = g_history_reg & mask;
       uint32_t entry_address = history_lower ^ pc_lower;
-      return change_2bit_predictor(g_predictors + entry_address,outcome);
+      change_2bit_predictor(g_predictors + entry_address,outcome);
+      g_history_reg = g_history_reg << 1;
+      if(outcome) g_history_reg = g_history_reg | 1;
       break;
     }
-    case TOURNAMENT:
+    case TOURNAMENT:{
+
+     uint32_t mask = 1 << ghistoryBits;
+      mask = mask - 1;
+      uint32_t pc_lower = pc & mask;
+      uint32_t history_lower = g_history_reg & mask;
+      uint32_t entry_address = history_lower ^ pc_lower;
+      uint8_t predict_global = get_predict(g_predictors + entry_address);
+      
+      uint32_t mask_local = 1 << pcIndexBits;
+      mask_local = mask_local - 1;
+      uint32_t pc_lower_local = pc & mask_local;
+
+      uint32_t mask_localhistory = 1 << lhistoryBits;
+      mask_localhistory = mask_localhistory - 1;
+
+      uint32_t local_history = *(local_history_table + pc_lower_local);
+      uint8_t predict_local = get_predict(local_prediction + (local_history & mask_localhistory));
+      uint8_t choice = get_predict(choice_table + pc_lower);
+      change_2bit_predictor(g_predictors + entry_address, outcome);
+      change_2bit_predictor(local_prediction + (local_history & mask_localhistory), outcome);
+      if (outcome == predict_local && outcome == predict_global){
+        // None
+      }
+      if (outcome != predict_local && outcome == predict_global){
+        // Decrease choice
+        change_2bit_predictor(choice_table + pc_lower, 0);
+      }
+      if (outcome == predict_local && outcome != predict_global){
+        //Increase choice
+        change_2bit_predictor(choice_table + pc_lower, 1);
+      }
+      if (outcome != predict_local && outcome != predict_global){
+        //None
+      }
+      g_history_reg = g_history_reg << 1;
+      if(outcome) g_history_reg = g_history_reg | 1;
+
+      *(local_history_table + pc_lower_local) = *(local_history_table + pc_lower_local) << 1;
+      if(outcome) *(local_history_table + pc_lower_local) = *(local_history_table + pc_lower_local) | 1;
       break;
+    }
     case CUSTOM:
       break;
     default:
