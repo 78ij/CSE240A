@@ -39,6 +39,7 @@ int verbose;
 
 // acutal gshare history register,  since pc is uint32_t, it is uint32_t.
 uint32_t g_history_reg = 0;
+uint64_t perceptron_history_reg = 0;
 // actual gshare 2-bit predictor.
 //         NT      NT      NT
 //      ----->  ----->  ----->
@@ -54,6 +55,15 @@ char *g_predictors;
 char *choice_table;
 uint32_t *local_history_table;
 char *local_prediction;
+
+// Our custom predictor
+// use int8 as perceptron weights
+// assume the history bit is x:
+// the space usage is (x + (2^x) * x * 8) bits
+// assuming x = 10, we have space = 8 bits + 10KB
+// assuming x = 12, we have space = 20 bits + 48KB
+// 12 is the highest.
+int8_t *perceptron_table;
 
 //Used in both gshare and tournament
 // since they both use 2-bit predictor.
@@ -125,7 +135,14 @@ init_predictor()
       break;
     }
     case CUSTOM:
+    {
+      ghistoryBits = 59;
+      size_t perceptron_entry_number = 1024;
+      // table of (ghistorybits) int8.
+      perceptron_table = calloc(perceptron_entry_number, ghistoryBits + 1);
       break;
+    }
+      
     default:
       break;
   }
@@ -179,7 +196,30 @@ make_prediction(uint32_t pc)
       break;
     }
     case CUSTOM:
-      break;
+      {
+        uint32_t mask = 1 << 10;
+        mask = mask - 1;
+        uint32_t pc_lower = pc & mask;
+        uint32_t history_lower = ((uint32_t) (perceptron_history_reg & 0xFFFFFFFF) & mask) ;
+        uint32_t entry_address = history_lower ^ pc_lower;
+        int8_t *perceptron = perceptron_table + (pc_lower * (ghistoryBits + 1));
+        // calculate perceptron result
+        // from low to high
+        int32_t result = *perceptron;
+        for(int i = 0; i < ghistoryBits; i++){
+          uint64_t mask_lsb = 1 << i;
+          // in the perceptron setting, not taken is -1, not 0
+          if (mask_lsb & perceptron_history_reg){
+            result += *(perceptron + i + 1);
+          }
+          else{
+            result -= *(perceptron + i + 1);
+          }
+        }
+        if(result >= 0) return 1;
+        else return 0;
+        break;
+      }
     default:
       break;
   }
@@ -255,8 +295,63 @@ train_predictor(uint32_t pc, uint8_t outcome)
       if(outcome) *(local_history_table + pc_lower_local) = *(local_history_table + pc_lower_local) | 1;
       break;
     }
-    case CUSTOM:
+    case CUSTOM:{
+        uint32_t mask = 1 << 10;
+        mask = mask - 1;
+        uint32_t pc_lower = pc & mask;
+        uint32_t history_lower = ((uint32_t) (perceptron_history_reg & 0xFFFFFFFF) & mask) ;
+        uint32_t entry_address = history_lower ^ pc_lower;
+        int8_t *perceptron = perceptron_table + (pc_lower * (ghistoryBits + 1));
+        // calculate perceptron result
+        // from low to high
+        int32_t result = *perceptron;
+        for(int i = 0; i < ghistoryBits; i++){
+          uint64_t mask_lsb = 1 << i;
+          // in the perceptron setting, not taken is -1, not 0
+          if (mask_lsb & perceptron_history_reg){
+            result += *(perceptron + i + 1);
+          }
+          else{
+            result -= *(perceptron + i + 1);
+          }
+        }
+        if (outcome && result >= 0) {
+          perceptron_history_reg = perceptron_history_reg << 1;
+          if(outcome) perceptron_history_reg = perceptron_history_reg | 1;
+          return;
+        }
+        if (!outcome && result < 0  ) {
+          perceptron_history_reg = perceptron_history_reg << 1;
+          if(outcome) perceptron_history_reg = perceptron_history_reg | 1;
+          return;
+        }
+        if (result >= 126 || result <= -126){
+          perceptron_history_reg = perceptron_history_reg << 1;
+          if(outcome) perceptron_history_reg = perceptron_history_reg | 1;
+          return;
+        }
+
+        int8_t update_multiplier = 0;
+        if (outcome) update_multiplier = 1;
+        else update_multiplier = -1;
+        
+        *perceptron += update_multiplier;
+
+        for(int i = 0; i < ghistoryBits; i++){
+          uint64_t mask_lsb = 1 << i;
+          // in the perceptron setting, not taken is -1, not 0
+          if (mask_lsb & perceptron_history_reg){
+            *(perceptron + i + 1) += update_multiplier;
+          }
+          else{
+            *(perceptron + i + 1) -= update_multiplier;
+          }
+        }
+        perceptron_history_reg = perceptron_history_reg << 1;
+        if(outcome) perceptron_history_reg = perceptron_history_reg | 1;  
       break;
+    }
+      
     default:
       break;
  }
